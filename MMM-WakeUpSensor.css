@@ -1,0 +1,31 @@
+/**
+ * MMM-WakeUpSensor.css
+ *
+ * Styles for the full-screen overlay injected by MMM-WakeUpSensor.
+ * The overlay sits above all module content.  Its opacity is animated
+ * in JavaScript using an inline `transition` value derived from the
+ * `fadeDuration` config option.
+ *
+ * State mapping (set via JS):
+ *   AWAY    → opacity: 1.0  (black, widgets invisible)
+ *   NEARBY  → opacity: 0.8  (widgets ~20% visible)
+ *   PRESENT → opacity: 0.0  (fully transparent, widgets 100% visible)
+ */
+
+#MMM-WakeUpSensor-overlay {
+    position:         fixed;
+    top:              0;
+    left:             0;
+    width:            100%;
+    height:           100%;
+    background-color: #000000;
+
+    /* Initial state: fully opaque (AWAY) */
+    opacity:          1;
+
+    /* Sit above all module content but do not capture pointer events */
+    z-index:          9998;
+    pointer-events:   none;
+
+    /* transition is injected inline from config (fadeDuration) */
+}

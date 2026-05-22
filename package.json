@@ -1,0 +1,19 @@
+{
+  "name": "MMM-WakeUpSensor",
+  "version": "1.0.0",
+  "description": "MagicMirror² module that uses a PIR and ultrasonic sensor to wake up the display when someone approaches.",
+  "main": "node_helper.js",
+  "keywords": [
+    "MagicMirror",
+    "PIR",
+    "ultrasonic",
+    "HC-SR04",
+    "presence",
+    "sensor"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "pigpio": "^3.3.1"
+  }
+}
