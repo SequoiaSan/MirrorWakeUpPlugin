@@ -25,7 +25,8 @@ Module.register("MMM-WakeUpSensor", {
         pirTimeout:         30000, // ms – how long NEARBY lasts after last PIR pulse
         ultrasonicTimeout:  3000,  // ms – grace period before leaving PRESENT
         fadeDuration:       2000,  // ms – CSS opacity transition duration
-        ultrasonicInterval: 1000   // ms – how often to fire the ultrasonic trigger
+        ultrasonicInterval: 1000,  // ms – how often to fire the ultrasonic trigger
+        debug:              false   // show sensor/state debug panel on screen
     },
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -35,6 +36,12 @@ Module.register("MMM-WakeUpSensor", {
         this.pirTimer       = null;   // timeout handle for PIR activity window
         this.ultrasonicTimer = null;  // timeout handle for PRESENT → downgrade
         this.overlay        = null;
+        this.debugPanel     = null;
+        this.debugInfo      = {
+            lastPirAt:      null,
+            lastDistance:   null,
+            lastSensorError: null
+        };
 
         // Send configuration to node_helper as soon as possible so GPIO
         // initialisation can begin while MagicMirror renders the DOM.
@@ -45,6 +52,9 @@ Module.register("MMM-WakeUpSensor", {
     notificationReceived: function (notification) {
         if (notification === "DOM_OBJECTS_CREATED") {
             this._createOverlay();
+            if (this.config.debug) {
+                this._createDebugPanel();
+            }
         }
     },
 
@@ -68,6 +78,46 @@ Module.register("MMM-WakeUpSensor", {
         this._applyState();
     },
 
+    _createDebugPanel: function () {
+        if (this.debugPanel) { return; }
+
+        var panel = document.createElement("div");
+        panel.id = "MMM-WakeUpSensor-debug";
+        document.body.appendChild(panel);
+        this.debugPanel = panel;
+
+        this._updateDebugPanel();
+    },
+
+    _updateDebugPanel: function () {
+        if (!this.config.debug || !this.debugPanel) { return; }
+
+        var distanceText = "n/a";
+        if (typeof this.debugInfo.lastDistance === "number") {
+            distanceText = (Math.round(this.debugInfo.lastDistance * 10) / 10) + " cm";
+        }
+
+        var pirLastSeen = "never";
+        if (this.debugInfo.lastPirAt) {
+            pirLastSeen = new Date(this.debugInfo.lastPirAt).toLocaleTimeString();
+        }
+
+        var lines = [
+            "WakeUpSensor Debug",
+            "State: " + this.state,
+            "Overlay opacity: " + (this.overlay ? this.overlay.style.opacity : "n/a"),
+            "PIR timer: " + (this.pirTimer ? "active" : "idle"),
+            "PIR last trigger: " + pirLastSeen,
+            "Ultrasonic distance: " + distanceText
+        ];
+
+        if (this.debugInfo.lastSensorError) {
+            lines.push("Sensor error: " + this.debugInfo.lastSensorError);
+        }
+
+        this.debugPanel.innerHTML = lines.join("<br>");
+    },
+
     // ── State helpers ──────────────────────────────────────────────────────
     _applyState: function () {
         if (!this.overlay) { return; }
@@ -81,6 +131,7 @@ Module.register("MMM-WakeUpSensor", {
         this.overlay.style.opacity = opacityMap[this.state] || "1";
         Log.info(this.name + ": State → " + this.state +
                  " (overlay opacity " + this.overlay.style.opacity + ")");
+        this._updateDebugPanel();
     },
 
     // ── Socket notifications from node_helper ──────────────────────────────
@@ -94,12 +145,16 @@ Module.register("MMM-WakeUpSensor", {
                 break;
             case "SENSOR_ERROR":
                 Log.error(this.name + ": Sensor error – " + payload.error);
+                this.debugInfo.lastSensorError = payload.error;
+                this._updateDebugPanel();
                 break;
         }
     },
 
     // ── PIR handler ────────────────────────────────────────────────────────
     _onPirDetected: function () {
+        this.debugInfo.lastPirAt = Date.now();
+
         // Ultrasonic takes full priority: ignore PIR while a person is confirmed.
         if (this.state !== "PRESENT") {
             this.state = "NEARBY";
@@ -117,11 +172,15 @@ Module.register("MMM-WakeUpSensor", {
                 self.state = "AWAY";
                 self._applyState();
             }
+            self._updateDebugPanel();
         }, this.config.pirTimeout);
+        this._updateDebugPanel();
     },
 
     // ── Ultrasonic handler ─────────────────────────────────────────────────
     _onDistanceMeasured: function (distance) {
+        this.debugInfo.lastDistance = distance;
+
         var withinRange = (
             distance !== null &&
             distance > 0 &&
@@ -155,9 +214,12 @@ Module.register("MMM-WakeUpSensor", {
                         self.state = self.pirTimer ? "NEARBY" : "AWAY";
                         self._applyState();
                     }
+                    self._updateDebugPanel();
                 }, this.config.ultrasonicTimeout);
             }
         }
+
+        this._updateDebugPanel();
     },
 
     // ── Required getDom – module renders nothing visible itself ────────────

@@ -76,7 +76,8 @@ Add the module to `~/MagicMirror/config/config.js`:
         pirTimeout:         30000, // ms — how long NEARBY lasts after last PIR pulse
         ultrasonicTimeout:  3000,  // ms — grace period before leaving PRESENT state
         fadeDuration:       2000,  // ms — CSS opacity transition speed
-        ultrasonicInterval: 1000   // ms — how often the ultrasonic sensor is polled
+        ultrasonicInterval: 1000,  // ms — how often the ultrasonic sensor is polled
+        debug:              false  // show on-screen live sensor/state diagnostics
     }
 }
 ```
@@ -93,6 +94,7 @@ Add the module to `~/MagicMirror/config/config.js`:
 | `ultrasonicTimeout` | `3000` | Milliseconds of no detection before leaving the PRESENT state |
 | `fadeDuration` | `2000` | Duration of the CSS fade transition in milliseconds |
 | `ultrasonicInterval` | `1000` | How often (ms) the ultrasonic sensor fires a measurement |
+| `debug` | `false` | Show a small on-screen debug panel with current PIR status, ultrasonic distance, mirror state and overlay opacity |
 
 ---
 
