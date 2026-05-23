@@ -48,9 +48,31 @@ Module.register("MMM-WakeUpSensor", {
             lastSensorError: null
         };
 
+        if (this.config.debug) {
+            Log.info(this.name + ": Debug mode ENABLED – on-screen debug panel will be shown.");
+        }
+
         // Send configuration to node_helper as soon as possible so GPIO
         // initialisation can begin while MagicMirror renders the DOM.
         this.sendSocketNotification("CONFIG", this.config);
+
+        // Fallback: attempt to create overlay/debug panel shortly after start
+        // in case DOM_OBJECTS_CREATED has already fired or doesn't reach us
+        // (some MagicMirror loading orders / module reloads can drop it).
+        // _createOverlay / _createDebugPanel are idempotent.
+        var self = this;
+        var trySetup = function () {
+            if (!document.body) { return; }
+            self._createOverlay();
+            if (self.config.debug) {
+                self._createDebugPanel();
+            }
+        };
+        if (document.readyState === "complete" || document.readyState === "interactive") {
+            setTimeout(trySetup, 0);
+        } else {
+            window.addEventListener("DOMContentLoaded", trySetup, { once: true });
+        }
     },
 
     // Called by MagicMirror² once all module DOM nodes exist.
@@ -71,9 +93,23 @@ Module.register("MMM-WakeUpSensor", {
      */
     _createOverlay: function () {
         if (this.overlay) { return; }
+        if (!document.body) { return; }
 
         var overlay = document.createElement("div");
         overlay.id  = "MMM-WakeUpSensor-overlay";
+
+        // Inline fallback styles so the overlay also works if the
+        // accompanying CSS file fails to load for any reason.
+        var s = overlay.style;
+        s.position        = "fixed";
+        s.top             = "0";
+        s.left            = "0";
+        s.width           = "100%";
+        s.height          = "100%";
+        s.backgroundColor = "#000000";
+        s.opacity         = "1";
+        s.zIndex          = "9998";
+        s.pointerEvents   = "none";
 
         // The transition duration comes from config so set it inline.
         overlay.style.transition = "opacity " + this.config.fadeDuration + "ms ease-in-out";
@@ -87,11 +123,34 @@ Module.register("MMM-WakeUpSensor", {
 
     _createDebugPanel: function () {
         if (this.debugPanel) { return; }
+        if (!document.body) { return; }
 
         var panel = document.createElement("div");
         panel.id = "MMM-WakeUpSensor-debug";
+
+        // Inline fallback styles so the panel is visible even if
+        // MMM-WakeUpSensor.css fails to load (cached old install, wrong
+        // module folder name, 404, etc.) and stays above the overlay
+        // even if other modules use high z-index values.
+        var s = panel.style;
+        s.position        = "fixed";
+        s.top             = "20px";
+        s.left            = "20px";
+        s.zIndex          = "2147483647"; // max signed 32-bit int
+        s.pointerEvents   = "none";
+        s.padding         = "10px 12px";
+        s.border          = "1px solid rgba(255, 255, 255, 0.35)";
+        s.borderRadius    = "6px";
+        s.backgroundColor = "rgba(0, 0, 0, 0.55)";
+        s.color           = "#ffffff";
+        s.fontSize        = "14px";
+        s.lineHeight      = "1.35";
+        s.fontFamily      = "monospace";
+
         document.body.appendChild(panel);
         this.debugPanel = panel;
+
+        Log.info(this.name + ": Debug panel created and attached to <body>.");
 
         this._updateDebugPanel();
     },

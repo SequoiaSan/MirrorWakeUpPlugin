@@ -34,7 +34,9 @@
     position:         fixed;
     top:              20px;
     left:             20px;
-    z-index:          9999;
+    /* Use the max safe z-index so the panel is always above the overlay
+       and any other module that may use a high z-index value. */
+    z-index:          2147483647;
     pointer-events:   none;
     padding:          10px 12px;
     border:           1px solid rgba(255, 255, 255, 0.35);
