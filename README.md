@@ -45,18 +45,37 @@ Raspberry Pi GPIO24 (BCM 24, pin 18) ←──── HC-SR04 ECHO
 
 ## Installation
 
+This module has **no Node native dependencies**. All GPIO work is
+delegated to small external OS processes — `gpiomon` from `libgpiod`
+for the PIR pin, and a tiny Python helper (`scripts/hcsr04.py`) using
+`gpiozero` for the HC-SR04. That means there is nothing to rebuild
+after a Node or Electron upgrade, and no more
+`Module did not self-register` failures.
+
 ```bash
 # 1. Clone into your MagicMirror modules folder
 cd ~/MagicMirror/modules
 git clone <this-repo-url> MMM-WakeUpSensor
 
-# 2. Install dependencies
+# 2. Install the system tools the helpers use.
+#    These are already present on stock Raspberry Pi OS, but install
+#    explicitly to be safe:
+sudo apt update
+sudo apt install -y gpiod python3 python3-gpiozero
+
+# 3. Make sure the user running MagicMirror is in the `gpio` group
+#    (it usually already is on Pi OS):
+sudo usermod -aG gpio "$USER"
+#    Log out and back in for the group change to take effect.
+
+# 4. (Optional) `npm install` — there are no runtime dependencies,
+#    so this is a no-op, but it keeps tooling happy:
 cd MMM-WakeUpSensor
 npm install
-
-# 3. pigpio requires access to /dev/mem – run MagicMirror with sudo
-#    or add the pi user to the gpio group and configure pigpio accordingly.
 ```
+
+> No `sudo` is required to run MagicMirror itself.  
+> No `electron-rebuild` is required — there are no native modules.
 
 ---
 
@@ -70,6 +89,7 @@ Add the module to `~/MagicMirror/config/config.js`:
     position: "bottom_center",   // position doesn't matter; module renders nothing visible
     config: {
         pirPin:             4,     // BCM GPIO pin for PIR OUT
+        pirChip:            "gpiochip0", // libgpiod chip name; "gpiochip4" on Pi 5
         trigPin:            23,    // BCM GPIO pin for HC-SR04 TRIG
         echoPin:            24,    // BCM GPIO pin for HC-SR04 ECHO
         presenceDistance:   150,   // cm — ultrasonic threshold to enter PRESENT state
@@ -87,6 +107,7 @@ Add the module to `~/MagicMirror/config/config.js`:
 | Option | Default | Description |
 |---|---|---|
 | `pirPin` | `4` | BCM GPIO number for PIR signal output |
+| `pirChip` | `"gpiochip0"` | libgpiod chip name passed to `gpiomon`. Use `"gpiochip4"` on Raspberry Pi 5 / Pi OS Bookworm. If left at the default, the helper will automatically retry with `gpiochip4` when `gpiochip0` is unavailable. |
 | `trigPin` | `23` | BCM GPIO number for HC-SR04 TRIG |
 | `echoPin` | `24` | BCM GPIO number for HC-SR04 ECHO |
 | `presenceDistance` | `150` | Distance in **cm** below which a person is "in front" of the mirror |
@@ -122,8 +143,8 @@ Add the module to `~/MagicMirror/config/config.js`:
 
 | Symptom | Likely cause |
 |---|---|
-| `pigpio not available` error | Run `npm install` inside the module folder |
-| `pigpio native binding failed to load` / `Module did not self-register` | The native binary was compiled against a different Node/Electron ABI than the one running MagicMirror. Rebuild it: `cd ~/MagicMirror/modules/MMM-WakeUpSensor && npm rebuild pigpio --update-binary` (or use `electron-rebuild` when running under Electron). Also note that `pigpio` only works on a Raspberry Pi. |
+| `Failed to spawn gpiomon` / `gpiomon exited unexpectedly` | The `gpiod` package is missing or the user running MagicMirror is not in the `gpio` group. Run `sudo apt install gpiod` and `sudo usermod -aG gpio "$USER"` (then log out / back in). On Raspberry Pi 5 set `pirChip: "gpiochip4"` in the module config. |
+| `HC-SR04 helper exited unexpectedly` / `gpiozero not available` | Install the Python helper deps: `sudo apt install python3 python3-gpiozero`. Make sure the user can access GPIO (gpio group). |
 | Mirror never wakes up | Check wiring; verify GPIO pin numbers (BCM numbering) |
 | Distance readings erratic | Add decoupling capacitor (100 µF) across HC-SR04 VCC/GND; check voltage divider |
 | PIR triggers too often | Adjust the PIR sensitivity potentiometer; increase `pirTimeout` |
