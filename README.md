@@ -123,6 +123,7 @@ Add the module to `~/MagicMirror/config/config.js`:
 | Symptom | Likely cause |
 |---|---|
 | `pigpio not available` error | Run `npm install` inside the module folder |
+| `pigpio native binding failed to load` / `Module did not self-register` | The native binary was compiled against a different Node/Electron ABI than the one running MagicMirror. Rebuild it: `cd ~/MagicMirror/modules/MMM-WakeUpSensor && npm rebuild pigpio --update-binary` (or use `electron-rebuild` when running under Electron). Also note that `pigpio` only works on a Raspberry Pi. |
 | Mirror never wakes up | Check wiring; verify GPIO pin numbers (BCM numbering) |
 | Distance readings erratic | Add decoupling capacitor (100 µF) across HC-SR04 VCC/GND; check voltage divider |
 | PIR triggers too often | Adjust the PIR sensitivity potentiometer; increase `pirTimeout` |

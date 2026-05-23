@@ -46,9 +46,9 @@ module.exports = NodeHelper.create({
 
     // ── Sensor initialisation ──────────────────────────────────────────────
     _initSensors: function () {
-        let Gpio;
+        let pigpio;
         try {
-            Gpio = require("pigpio").Gpio;
+            pigpio = require("pigpio");
         } catch (err) {
             const msg = "pigpio not available – " + err.message +
                         ". Run: cd ~/MagicMirror/modules/MMM-WakeUpSensor && npm install";
@@ -56,6 +56,31 @@ module.exports = NodeHelper.create({
             this.sendSocketNotification("SENSOR_ERROR", { error: msg });
             return;
         }
+
+        // pigpio's JS wrapper catches native-binding load failures (e.g. the
+        // "Module did not self-register" error that occurs when the .node
+        // binary was compiled against a different Node/Electron ABI than the
+        // one currently running MagicMirror) and only prints a warning – the
+        // require() above then succeeds with a non-functional stub. If we
+        // proceed, `new Gpio(...)` later fails with the cryptic
+        // "pigpio.gpioInitialise is not a function". Detect that case here
+        // and surface a clear, actionable error instead.
+        if (typeof pigpio.gpioInitialise !== "function") {
+            const msg = "pigpio native binding failed to load (\"Module did " +
+                        "not self-register\"). This usually means the binary " +
+                        "was built against a different Node/Electron ABI than " +
+                        "the one running MagicMirror. Rebuild it from the " +
+                        "module folder: cd ~/MagicMirror/modules/MMM-WakeUpSensor " +
+                        "&& npm rebuild pigpio --update-binary  (or, when " +
+                        "running under Electron, use electron-rebuild). " +
+                        "pigpio also requires a Raspberry Pi – it will not " +
+                        "work on other hardware.";
+            console.error("[MMM-WakeUpSensor] " + msg);
+            this.sendSocketNotification("SENSOR_ERROR", { error: msg });
+            return;
+        }
+
+        const Gpio = pigpio.Gpio;
 
         try {
             this._setupPir(Gpio);
