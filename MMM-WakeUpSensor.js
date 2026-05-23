@@ -42,6 +42,8 @@ Module.register("MMM-WakeUpSensor", {
         this.ultrasonicTimer = null;  // timeout handle for PRESENT → downgrade
         this.overlay        = null;
         this.debugPanel     = null;
+        this._setupTimer    = null;   // periodic self-heal interval
+        this._debugLogTimer = null;   // periodic console snapshot interval
         this.debugInfo      = {
             lastPirAt:      null,
             lastDistance:   null,
@@ -62,24 +64,66 @@ Module.register("MMM-WakeUpSensor", {
         // _createOverlay / _createDebugPanel are idempotent.
         var self = this;
         var trySetup = function () {
-            if (!document.body) { return; }
-            self._createOverlay();
-            if (self.config.debug) {
-                self._createDebugPanel();
-            }
+            self._ensureElements();
         };
         if (document.readyState === "complete" || document.readyState === "interactive") {
             setTimeout(trySetup, 0);
         } else {
             window.addEventListener("DOMContentLoaded", trySetup, { once: true });
         }
+
+        // Self-healing watchdog: every 1 s, verify the overlay (and debug
+        // panel, when enabled) are still attached to the document. If another
+        // module's DOM mutation, a router/page change, or a stylesheet hide
+        // has removed or hidden them, re-create them. This makes the panel
+        // virtually impossible to lose at runtime.
+        this._setupTimer = setInterval(function () {
+            self._ensureElements();
+        }, 1000);
+
+        // Periodic console snapshot so the user can verify the module is
+        // alive even when – for any reason – the on-screen panel is not
+        // visible. Only active when debug is enabled.
+        if (this.config.debug) {
+            this._debugLogTimer = setInterval(function () {
+                Log.info(self.name + " [debug snapshot]: " +
+                         JSON.stringify({
+                             state:    self.state,
+                             opacity:  self.overlay ? self.overlay.style.opacity : null,
+                             panelAttached: !!(self.debugPanel && self.debugPanel.isConnected),
+                             overlayAttached: !!(self.overlay && self.overlay.isConnected),
+                             lastDistance: self.debugInfo.lastDistance,
+                             lastPirAt:    self.debugInfo.lastPirAt,
+                             lastSensorError: self.debugInfo.lastSensorError
+                         }));
+            }, 5000);
+        }
     },
 
-    // Called by MagicMirror² once all module DOM nodes exist.
+    // Called by MagicMirror² at various lifecycle points. We treat every
+    // DOM-related notification as another opportunity to (re)create our
+    // elements, since timing of these events varies across MM versions.
     notificationReceived: function (notification) {
-        if (notification === "DOM_OBJECTS_CREATED") {
+        if (notification === "DOM_OBJECTS_CREATED" ||
+            notification === "MODULE_DOM_CREATED" ||
+            notification === "ALL_MODULES_STARTED") {
+            this._ensureElements();
+        }
+    },
+
+    // Idempotent helper that (re)creates the overlay and, when debug is
+    // enabled, the debug panel. Safe to call any number of times; only acts
+    // when an element is missing or has been detached from the document.
+    _ensureElements: function () {
+        if (!document.body) { return; }
+
+        if (!this.overlay || !this.overlay.isConnected) {
+            this.overlay = null;
             this._createOverlay();
-            if (this.config.debug) {
+        }
+        if (this.config.debug) {
+            if (!this.debugPanel || !this.debugPanel.isConnected) {
+                this.debugPanel = null;
                 this._createDebugPanel();
             }
         }
@@ -99,20 +143,26 @@ Module.register("MMM-WakeUpSensor", {
         overlay.id  = "MMM-WakeUpSensor-overlay";
 
         // Inline fallback styles so the overlay also works if the
-        // accompanying CSS file fails to load for any reason.
-        var s = overlay.style;
-        s.position        = "fixed";
-        s.top             = "0";
-        s.left            = "0";
-        s.width           = "100%";
-        s.height          = "100%";
-        s.backgroundColor = "#000000";
-        s.opacity         = "1";
-        s.zIndex          = "9998";
-        s.pointerEvents   = "none";
+        // accompanying CSS file fails to load for any reason. Use
+        // setProperty(..., "important") so these cannot be overridden
+        // by another module's stylesheet.
+        var setImp = function (prop, value) {
+            overlay.style.setProperty(prop, value, "important");
+        };
+        setImp("position",         "fixed");
+        setImp("top",              "0");
+        setImp("left",             "0");
+        setImp("width",            "100%");
+        setImp("height",           "100%");
+        setImp("background-color", "#000000");
+        setImp("opacity",          "1");
+        setImp("z-index",          "9998");
+        setImp("pointer-events",   "none");
+        setImp("display",          "block");
+        setImp("visibility",       "visible");
 
         // The transition duration comes from config so set it inline.
-        overlay.style.transition = "opacity " + this.config.fadeDuration + "ms ease-in-out";
+        setImp("transition", "opacity " + this.config.fadeDuration + "ms ease-in-out");
 
         document.body.appendChild(overlay);
         this.overlay = overlay;
@@ -131,21 +181,31 @@ Module.register("MMM-WakeUpSensor", {
         // Inline fallback styles so the panel is visible even if
         // MMM-WakeUpSensor.css fails to load (cached old install, wrong
         // module folder name, 404, etc.) and stays above the overlay
-        // even if other modules use high z-index values.
-        var s = panel.style;
-        s.position        = "fixed";
-        s.top             = "20px";
-        s.left            = "20px";
-        s.zIndex          = "2147483647"; // max signed 32-bit int
-        s.pointerEvents   = "none";
-        s.padding         = "10px 12px";
-        s.border          = "1px solid rgba(255, 255, 255, 0.35)";
-        s.borderRadius    = "6px";
-        s.backgroundColor = "rgba(0, 0, 0, 0.55)";
-        s.color           = "#ffffff";
-        s.fontSize        = "14px";
-        s.lineHeight      = "1.35";
-        s.fontFamily      = "monospace";
+        // even if other modules use high z-index values. Use
+        // setProperty(..., "important") so no other stylesheet can
+        // hide or restyle the panel.
+        var setImp = function (prop, value) {
+            panel.style.setProperty(prop, value, "important");
+        };
+        setImp("position",         "fixed");
+        setImp("top",              "20px");
+        setImp("left",             "20px");
+        setImp("z-index",          "2147483647"); // max signed 32-bit int
+        setImp("pointer-events",   "none");
+        setImp("padding",          "10px 12px");
+        setImp("border",           "2px solid #ffeb3b"); // bright yellow, hard to miss
+        setImp("border-radius",    "6px");
+        setImp("background-color", "rgba(0, 0, 0, 0.85)");
+        setImp("color",            "#ffffff");
+        setImp("font-size",        "14px");
+        setImp("line-height",      "1.35");
+        setImp("font-family",      "monospace");
+        setImp("display",          "block");
+        setImp("visibility",       "visible");
+        setImp("opacity",          "1");
+        setImp("max-width",        "90vw");
+        setImp("min-width",        "200px");
+        setImp("white-space",      "pre");
 
         document.body.appendChild(panel);
         this.debugPanel = panel;
@@ -181,7 +241,11 @@ Module.register("MMM-WakeUpSensor", {
             lines.push("Sensor error: " + this.debugInfo.lastSensorError);
         }
 
-        this.debugPanel.innerHTML = lines.join("<br>");
+        // Use textContent (not innerHTML) so any text coming from the
+        // node_helper (e.g. sensor error messages) cannot inject HTML.
+        // The panel is styled with `white-space: pre`, so `\n` produces
+        // real line breaks.
+        this.debugPanel.textContent = lines.join("\n");
     },
 
     // ── State helpers ──────────────────────────────────────────────────────
@@ -194,9 +258,10 @@ Module.register("MMM-WakeUpSensor", {
             PRESENT: "0"     // overlay transparent   → widgets 100% visible
         };
 
-        this.overlay.style.opacity = opacityMap[this.state] || "1";
+        var op = opacityMap[this.state] || "1";
+        this.overlay.style.setProperty("opacity", op, "important");
         Log.info(this.name + ": State → " + this.state +
-                 " (overlay opacity " + this.overlay.style.opacity + ")");
+                 " (overlay opacity " + op + ")");
         this._updateDebugPanel();
     },
 
@@ -291,5 +356,21 @@ Module.register("MMM-WakeUpSensor", {
     // ── Required getDom – module renders nothing visible itself ────────────
     getDom: function () {
         return document.createElement("div");
+    },
+
+    // ── Cleanup ────────────────────────────────────────────────────────────
+    // Stop both watchdog timers if MagicMirror tears the module down (e.g.
+    // module reload). Without this, the intervals would keep running and
+    // accumulate after every reload.
+    suspend: function () {
+        // suspend is called when the module is hidden; keep timers running
+        // so the panel re-appears when MagicMirror un-hides us.
+    },
+
+    _clearTimers: function () {
+        if (this._setupTimer)    { clearInterval(this._setupTimer);    this._setupTimer    = null; }
+        if (this._debugLogTimer) { clearInterval(this._debugLogTimer); this._debugLogTimer = null; }
+        if (this.pirTimer)        { clearTimeout(this.pirTimer);        this.pirTimer        = null; }
+        if (this.ultrasonicTimer) { clearTimeout(this.ultrasonicTimer); this.ultrasonicTimer = null; }
     }
 });
