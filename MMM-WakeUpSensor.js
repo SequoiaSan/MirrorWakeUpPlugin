@@ -29,6 +29,11 @@ Module.register("MMM-WakeUpSensor", {
         debug:              false   // show sensor/state debug panel on screen
     },
 
+    // ── Styles ─────────────────────────────────────────────────────────────
+    getStyles: function () {
+        return ["MMM-WakeUpSensor.css"];
+    },
+
     // ── Lifecycle ──────────────────────────────────────────────────────────
     start: function () {
         Log.info(this.name + ": Starting.");
@@ -65,6 +70,8 @@ Module.register("MMM-WakeUpSensor", {
      * without touching individual module DOM trees.
      */
     _createOverlay: function () {
+        if (this.overlay) { return; }
+
         var overlay = document.createElement("div");
         overlay.id  = "MMM-WakeUpSensor-overlay";
 
