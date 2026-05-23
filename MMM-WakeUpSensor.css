@@ -39,11 +39,13 @@
     z-index:          2147483647;
     pointer-events:   none;
     padding:          10px 12px;
-    border:           1px solid rgba(255, 255, 255, 0.35);
+    /* Bright yellow border so the panel is unmistakable on screen. */
+    border:           2px solid #ffeb3b;
     border-radius:    6px;
-    background-color: rgba(0, 0, 0, 0.55);
+    background-color: rgba(0, 0, 0, 0.85);
     color:            #ffffff;
     font-size:        14px;
     line-height:      1.35;
     font-family:      monospace;
+    white-space:      pre;
 }
