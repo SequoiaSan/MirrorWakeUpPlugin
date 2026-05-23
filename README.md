@@ -143,7 +143,7 @@ Add the module to `~/MagicMirror/config/config.js`:
 
 | Symptom | Likely cause |
 |---|---|
-| `Failed to spawn gpiomon` / `gpiomon exited unexpectedly` | The `gpiod` package is missing or the user running MagicMirror is not in the `gpio` group. Run `sudo apt install gpiod` and `sudo usermod -aG gpio "$USER"` (then log out / back in). On Raspberry Pi 5 set `pirChip: "gpiochip4"` in the module config. |
+| `Failed to spawn gpiomon` / `gpiomon exited unexpectedly` / `gpiomon: invalid argument -r` | The `gpiod` package is missing, the user running MagicMirror is not in the `gpio` group, or you have a very old plugin version that pre-dates libgpiod v2 support. Run `sudo apt install gpiod` and `sudo usermod -aG gpio "$USER"` (then log out / back in). On Raspberry Pi 5 set `pirChip: "gpiochip4"` in the module config. The helper auto-detects libgpiod v1 vs v2 and uses the matching `gpiomon` syntax. |
 | `HC-SR04 helper exited unexpectedly` / `gpiozero not available` | Install the Python helper deps: `sudo apt install python3 python3-gpiozero`. Make sure the user can access GPIO (gpio group). |
 | Mirror never wakes up | Check wiring; verify GPIO pin numbers (BCM numbering) |
 | Distance readings erratic | Add decoupling capacitor (100 µF) across HC-SR04 VCC/GND; check voltage divider |
