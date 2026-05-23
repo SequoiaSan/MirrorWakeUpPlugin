@@ -4,10 +4,22 @@
  * node_helper.js – MMM-WakeUpSensor
  *
  * Runs on the Raspberry Pi server side.
- * Interfaces with hardware via the `pigpio` library:
  *
- *   PIR sensor   – digital GPIO input, alert on edge change
- *   HC-SR04      – 10 µs trigger pulse, echo pulse duration → distance in cm
+ * Instead of loading the `pigpio` native binding into Electron (which
+ * frequently fails with "Module did not self-register" after a Node or
+ * Electron upgrade), all GPIO work is delegated to small external OS
+ * processes whose stdout we parse:
+ *
+ *   PIR sensor   – `gpiomon` (libgpiod, pre-installed on Pi OS) watches
+ *                  for rising edges on the PIR pin.
+ *   HC-SR04      – `python3 scripts/hcsr04.py` uses gpiozero to do the
+ *                  10 µs trigger and microsecond-precision echo timing
+ *                  in a separate process, then prints distances (cm)
+ *                  one per line.
+ *
+ * This mirrors the approach used by modules like MMM-Universal-Pir:
+ * no native addons are loaded into Electron, so there is nothing to
+ * rebuild for the current Node/Electron ABI.
  *
  * Sends to the frontend:
  *   PIR_DETECTED       {}
@@ -16,6 +28,9 @@
  */
 
 const NodeHelper = require("node_helper");
+const { spawn }  = require("child_process");
+const path       = require("path");
+const readline   = require("readline");
 
 module.exports = NodeHelper.create({
 
@@ -26,14 +41,9 @@ module.exports = NodeHelper.create({
     },
 
     _resetState: function () {
-        this.config           = null;
-        this.pirSensor        = null;
-        this.usTrigger        = null;  // ultrasonic trigger GPIO
-        this.usEcho           = null;  // ultrasonic echo GPIO
-        this.measureInterval  = null;
-        this.echoStartTick    = null;  // tick (µs) when echo went HIGH
-        this.isMeasuring      = false; // guard against overlapping measurements
-        this.measureTimeout   = null;  // safety timer per measurement
+        this.config       = null;
+        this.pirProc      = null;
+        this.ultrasonicProc = null;
     },
 
     // ── Socket notifications from frontend ─────────────────────────────────
@@ -46,45 +56,9 @@ module.exports = NodeHelper.create({
 
     // ── Sensor initialisation ──────────────────────────────────────────────
     _initSensors: function () {
-        let pigpio;
         try {
-            pigpio = require("pigpio");
-        } catch (err) {
-            const msg = "pigpio not available – " + err.message +
-                        ". Run: cd ~/MagicMirror/modules/MMM-WakeUpSensor && npm install";
-            console.error("[MMM-WakeUpSensor] " + msg);
-            this.sendSocketNotification("SENSOR_ERROR", { error: msg });
-            return;
-        }
-
-        // pigpio's JS wrapper catches native-binding load failures (e.g. the
-        // "Module did not self-register" error that occurs when the .node
-        // binary was compiled against a different Node/Electron ABI than the
-        // one currently running MagicMirror) and only prints a warning – the
-        // require() above then succeeds with a non-functional stub. If we
-        // proceed, `new Gpio(...)` later fails with the cryptic
-        // "pigpio.gpioInitialise is not a function". Detect that case here
-        // and surface a clear, actionable error instead.
-        if (typeof pigpio.gpioInitialise !== "function") {
-            const msg = "pigpio native binding failed to load (\"Module did " +
-                        "not self-register\"). This usually means the binary " +
-                        "was built against a different Node/Electron ABI than " +
-                        "the one running MagicMirror. Rebuild it from the " +
-                        "module folder: cd ~/MagicMirror/modules/MMM-WakeUpSensor " +
-                        "&& npm rebuild pigpio --update-binary  (or, when " +
-                        "running under Electron, use electron-rebuild). " +
-                        "pigpio also requires a Raspberry Pi – it will not " +
-                        "work on other hardware.";
-            console.error("[MMM-WakeUpSensor] " + msg);
-            this.sendSocketNotification("SENSOR_ERROR", { error: msg });
-            return;
-        }
-
-        const Gpio = pigpio.Gpio;
-
-        try {
-            this._setupPir(Gpio);
-            this._setupUltrasonic(Gpio);
+            this._setupPir();
+            this._setupUltrasonic();
             console.log("[MMM-WakeUpSensor] Sensors initialised. " +
                         "PIR pin: " + this.config.pirPin +
                         ", TRIG: "  + this.config.trigPin +
@@ -96,106 +70,175 @@ module.exports = NodeHelper.create({
         }
     },
 
-    // ── PIR ────────────────────────────────────────────────────────────────
-    _setupPir: function (Gpio) {
-        this.pirSensor = new Gpio(this.config.pirPin, {
-            mode:        Gpio.INPUT,
-            pullUpDown:  Gpio.PUD_DOWN,
-            alert:       true          // triggers the 'alert' event on edge changes
+    // ── PIR (via gpiomon from libgpiod) ────────────────────────────────────
+    //
+    // `gpiomon` prints one line for every requested edge event. We use
+    // `-r` (rising edges only) and `-n 0` to keep it running forever.
+    // Pi OS Bookworm renamed the chip to `gpiochip4` on Pi 5, but
+    // libgpiod also accepts the chip label – we let the user override
+    // via config.pirChip and default to "gpiochip0" which works on
+    // Pi 1–4. The script tries gpiochip0 first, then gpiochip4 as a
+    // fallback if the first attempt exits immediately.
+    _setupPir: function () {
+        const pin  = this.config.pirPin;
+        const chip = this.config.pirChip || "gpiochip0";
+
+        this._spawnGpiomon(chip, pin, /*allowFallback=*/ chip === "gpiochip0");
+    },
+
+    _spawnGpiomon: function (chip, pin, allowFallback) {
+        // -r : rising edges only
+        // -n 0 (i.e. omit -n) : never exit
+        // -F "%e" : print just the event type, keeps output minimal
+        const args = ["-r", "-F", "%e %o", chip, String(pin)];
+
+        let proc;
+        try {
+            proc = spawn("gpiomon", args, { stdio: ["ignore", "pipe", "pipe"] });
+        } catch (err) {
+            const msg = "Failed to spawn gpiomon: " + err.message +
+                        ". Install with: sudo apt install gpiod";
+            console.error("[MMM-WakeUpSensor] " + msg);
+            this.sendSocketNotification("SENSOR_ERROR", { error: msg });
+            return;
+        }
+
+        this.pirProc = proc;
+        const startedAt = Date.now();
+
+        proc.on("error", (err) => {
+            if (this.pirProc !== proc) { return; }
+            const msg = "gpiomon error: " + err.message +
+                        ". Install with: sudo apt install gpiod";
+            console.error("[MMM-WakeUpSensor] " + msg);
+            this.sendSocketNotification("SENSOR_ERROR", { error: msg });
         });
 
-        this.pirSensor.on("alert", (level) => {
-            if (level === 1) {
-                // Rising edge = motion detected
+        const stderrChunks = [];
+        proc.stderr.on("data", (buf) => {
+            stderrChunks.push(buf.toString());
+        });
+
+        const rl = readline.createInterface({ input: proc.stdout });
+        rl.on("line", (line) => {
+            // Any line on stdout means a rising edge was observed.
+            if (line && line.length > 0) {
                 this.sendSocketNotification("PIR_DETECTED", {});
             }
         });
+
+        proc.on("exit", (code, signal) => {
+            if (this.pirProc !== proc) { return; } // superseded / stopped
+            this.pirProc = null;
+            const stderr = stderrChunks.join("").trim();
+            const elapsed = Date.now() - startedAt;
+
+            // If gpiomon exits almost immediately and the user is on a Pi 5
+            // (Bookworm), try gpiochip4 as a fallback. We only attempt the
+            // fallback once.
+            if (allowFallback && elapsed < 2000) {
+                console.warn("[MMM-WakeUpSensor] gpiomon on " + chip +
+                             " exited (code=" + code + ", signal=" + signal +
+                             "); retrying with gpiochip4. stderr: " + stderr);
+                this._spawnGpiomon("gpiochip4", pin, /*allowFallback=*/ false);
+                return;
+            }
+
+            const msg = "gpiomon exited unexpectedly (code=" + code +
+                        ", signal=" + signal + "). " +
+                        (stderr ? "stderr: " + stderr + ". " : "") +
+                        "Ensure the `gpiod` package is installed " +
+                        "(sudo apt install gpiod) and that the user " +
+                        "running MagicMirror has access to " + chip +
+                        " (gpio group).";
+            console.error("[MMM-WakeUpSensor] " + msg);
+            this.sendSocketNotification("SENSOR_ERROR", { error: msg });
+        });
     },
 
-    // ── Ultrasonic (HC-SR04) ───────────────────────────────────────────────
-    _setupUltrasonic: function (Gpio) {
-        // Trigger pin – output
-        this.usTrigger = new Gpio(this.config.trigPin, { mode: Gpio.OUTPUT });
-        this.usTrigger.digitalWrite(0); // ensure LOW at start
+    // ── Ultrasonic (HC-SR04, via Python helper) ────────────────────────────
+    _setupUltrasonic: function () {
+        const trig     = this.config.trigPin;
+        const echo     = this.config.echoPin;
+        const interval = Math.max(0.05, (this.config.ultrasonicInterval || 1000) / 1000);
+        const script   = path.join(__dirname, "scripts", "hcsr04.py");
 
-        // Echo pin – input with µs-level alert
-        this.usEcho = new Gpio(this.config.echoPin, {
-            mode:  Gpio.INPUT,
-            alert: true
+        let proc;
+        try {
+            proc = spawn("python3",
+                         [script, String(trig), String(echo), String(interval)],
+                         { stdio: ["ignore", "pipe", "pipe"] });
+        } catch (err) {
+            const msg = "Failed to spawn python3 for HC-SR04 helper: " +
+                        err.message +
+                        ". Install with: sudo apt install python3 python3-gpiozero";
+            console.error("[MMM-WakeUpSensor] " + msg);
+            this.sendSocketNotification("SENSOR_ERROR", { error: msg });
+            return;
+        }
+
+        this.ultrasonicProc = proc;
+
+        proc.on("error", (err) => {
+            if (this.ultrasonicProc !== proc) { return; }
+            const msg = "HC-SR04 helper error: " + err.message;
+            console.error("[MMM-WakeUpSensor] " + msg);
+            this.sendSocketNotification("SENSOR_ERROR", { error: msg });
         });
 
-        // Capture echo pulse duration
-        this.usEcho.on("alert", (level, tick) => {
-            if (level === 1) {
-                // Rising edge: echo started
-                this.echoStartTick = tick;
-
-            } else if (level === 0 && this.echoStartTick !== null) {
-                // Falling edge: echo finished
-                // Use unsigned subtraction to handle the 32-bit tick wrap-around
-                // that occurs every ~71.5 minutes.
-                const elapsedUs = ((tick - this.echoStartTick) >>> 0);
-                this.echoStartTick = null;
-                this.isMeasuring   = false;
-
-                if (this.measureTimeout) {
-                    clearTimeout(this.measureTimeout);
-                    this.measureTimeout = null;
+        const stderrChunks = [];
+        proc.stderr.on("data", (buf) => {
+            const text = buf.toString();
+            stderrChunks.push(text);
+            // Forward each stderr line so it shows up in MagicMirror logs.
+            text.split(/\r?\n/).forEach((line) => {
+                if (line.trim().length > 0) {
+                    console.warn("[MMM-WakeUpSensor] hcsr04.py: " + line);
                 }
+            });
+        });
 
-                // HC-SR04: distance (cm) = elapsed (µs) / 58.2
-                // Valid range: 2 cm – 400 cm
-                const distance = elapsedUs / 58.2;
+        const rl = readline.createInterface({ input: proc.stdout });
+        rl.on("line", (line) => {
+            const trimmed = line.trim();
+            if (trimmed.length === 0) { return; }
+            const distance = parseFloat(trimmed);
+            if (!isFinite(distance)) { return; }
 
-                if (distance >= 2 && distance <= 400) {
-                    this.sendSocketNotification("DISTANCE_MEASURED", { distance });
-                } else {
-                    // Out-of-range reading – report as very far away
-                    this.sendSocketNotification("DISTANCE_MEASURED", { distance: 9999 });
-                }
+            // Match the contract of the previous implementation:
+            // valid HC-SR04 range is 2 cm – 400 cm; anything else is 9999.
+            if (distance >= 2 && distance <= 400) {
+                this.sendSocketNotification("DISTANCE_MEASURED", { distance });
+            } else {
+                this.sendSocketNotification("DISTANCE_MEASURED", { distance: 9999 });
             }
         });
 
-        // Periodic trigger
-        this.measureInterval = setInterval(() => {
-            if (this.isMeasuring) { return; } // skip if last echo not yet received
-
-            this.isMeasuring   = true;
-            this.echoStartTick = null;
-
-            // Send a 10 µs HIGH pulse to start a measurement
-            this.usTrigger.trigger(10, 1);
-
-            // Safety net: if no echo arrives within 60 ms (≈10 m round-trip),
-            // assume the sensor is out of range and reset the measuring flag.
-            this.measureTimeout = setTimeout(() => {
-                this.measureTimeout  = null;
-                this.isMeasuring     = false;
-                this.echoStartTick   = null;
-                this.sendSocketNotification("DISTANCE_MEASURED", { distance: 9999 });
-            }, 60);
-
-        }, this.config.ultrasonicInterval);
+        proc.on("exit", (code, signal) => {
+            if (this.ultrasonicProc !== proc) { return; } // superseded / stopped
+            this.ultrasonicProc = null;
+            const stderr = stderrChunks.join("").trim();
+            const msg = "HC-SR04 helper exited unexpectedly (code=" + code +
+                        ", signal=" + signal + "). " +
+                        (stderr ? "stderr: " + stderr + ". " : "") +
+                        "Ensure python3 and gpiozero are installed " +
+                        "(sudo apt install python3 python3-gpiozero) and " +
+                        "that the user running MagicMirror is in the gpio group.";
+            console.error("[MMM-WakeUpSensor] " + msg);
+            this.sendSocketNotification("SENSOR_ERROR", { error: msg });
+        });
     },
 
     // ── Cleanup ────────────────────────────────────────────────────────────
     stop: function () {
         console.log("[MMM-WakeUpSensor] Stopping node helper.");
 
-        if (this.measureInterval) {
-            clearInterval(this.measureInterval);
-            this.measureInterval = null;
-        }
-        if (this.measureTimeout) {
-            clearTimeout(this.measureTimeout);
-            this.measureTimeout = null;
-        }
-
-        // Release pigpio resources
-        try {
-            require("pigpio").terminate();
-        } catch (e) {
-            // pigpio may not have been loaded; ignore
+        for (const key of ["pirProc", "ultrasonicProc"]) {
+            const proc = this[key];
+            if (proc) {
+                this[key] = null; // clear first so the 'exit' handler ignores it
+                try { proc.kill("SIGTERM"); } catch (e) { /* ignore */ }
+            }
         }
 
         this._resetState();
