@@ -28,9 +28,35 @@
  */
 
 const NodeHelper = require("node_helper");
-const { spawn }  = require("child_process");
+const { spawn, execFileSync } = require("child_process");
 const path       = require("path");
 const readline   = require("readline");
+
+// Detect the major version of the installed `gpiomon` (libgpiod) binary.
+// libgpiod v1.x (Pi OS up to Bullseye) accepts:
+//     gpiomon -r -F "%e %o" <chip> <offset>
+// libgpiod v2.x (Pi OS Bookworm and later) redesigned the CLI and no
+// longer accepts `-r` or a positional chip; the equivalent invocation is:
+//     gpiomon -e rising -c <chip> -F "%e %o" <offset>
+// Calling the v1 syntax against a v2 binary fails with
+// "invalid argument -r".  We probe `gpiomon --version` once and cache the
+// result so we can build the right command line.
+let _gpiomonMajor = null;
+function gpiomonMajorVersion() {
+    if (_gpiomonMajor !== null) { return _gpiomonMajor; }
+    try {
+        const out = execFileSync("gpiomon", ["--version"],
+                                 { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+        const m = out.match(/v?(\d+)\.(\d+)/);
+        if (m) { _gpiomonMajor = parseInt(m[1], 10); }
+    } catch (e) {
+        // Binary missing or refused to report a version – leave unknown so
+        // the caller can decide on a sensible default and surface the real
+        // spawn error to the user.
+    }
+    if (_gpiomonMajor === null) { _gpiomonMajor = 0; }
+    return _gpiomonMajor;
+}
 
 module.exports = NodeHelper.create({
 
@@ -72,13 +98,15 @@ module.exports = NodeHelper.create({
 
     // ── PIR (via gpiomon from libgpiod) ────────────────────────────────────
     //
-    // `gpiomon` prints one line for every requested edge event. We use
-    // `-r` (rising edges only) and `-n 0` to keep it running forever.
-    // Pi OS Bookworm renamed the chip to `gpiochip4` on Pi 5, but
-    // libgpiod also accepts the chip label – we let the user override
-    // via config.pirChip and default to "gpiochip0" which works on
-    // Pi 1–4. The script tries gpiochip0 first, then gpiochip4 as a
-    // fallback if the first attempt exits immediately.
+    // `gpiomon` prints one line for every requested edge event.  We ask
+    // for rising edges only and let it run forever.  The CLI changed
+    // between libgpiod v1 and v2, so we build different argv lists per
+    // version (see `gpiomonMajorVersion` above).  Pi OS Bookworm renamed
+    // the chip to `gpiochip4` on Pi 5, but libgpiod also accepts the chip
+    // label – we let the user override via config.pirChip and default to
+    // "gpiochip0" which works on Pi 1–4.  The script tries gpiochip0
+    // first, then gpiochip4 as a fallback if the first attempt exits
+    // immediately.
     _setupPir: function () {
         const pin  = this.config.pirPin;
         const chip = this.config.pirChip || "gpiochip0";
@@ -87,10 +115,15 @@ module.exports = NodeHelper.create({
     },
 
     _spawnGpiomon: function (chip, pin, allowFallback) {
-        // -r : rising edges only
-        // -n 0 (i.e. omit -n) : never exit
-        // -F "%e" : print just the event type, keeps output minimal
-        const args = ["-r", "-F", "%e %o", chip, String(pin)];
+        // Format `%e %o` (event type + offset) is accepted by both v1 and
+        // v2.  When the version probe fails (binary missing or unparsable
+        // --version output) we assume v2 because that is what current Pi
+        // OS releases ship; a missing binary will still surface a clear
+        // "Failed to spawn gpiomon" error below.
+        const major = gpiomonMajorVersion();
+        const args = (major === 1)
+            ? ["-r", "-F", "%e %o", chip, String(pin)]
+            : ["-e", "rising", "-c", chip, "-F", "%e %o", String(pin)];
 
         let proc;
         try {
